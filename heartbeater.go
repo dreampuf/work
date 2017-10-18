@@ -9,18 +9,21 @@ import (
 	"time"
 )
 
+const (
+	beatPeriod = 5 * time.Second
+)
+
 type workerPoolHeartbeater struct {
 	workerPoolID string
 	namespace    string // eg, "myapp-work"
 	pool         *redis.Pool
-
-	//
-	concurrency uint
-	jobNames    string
-	startedAt   int64
-	pid         int
-	hostname    string
-	workerIDs   string
+	beatPeriod   time.Duration
+	concurrency  uint
+	jobNames     string
+	startedAt    int64
+	pid          int
+	hostname     string
+	workerIDs    string
 
 	stopChan         chan struct{}
 	doneStoppingChan chan struct{}
@@ -37,12 +40,11 @@ func newWorkerPoolHeartbeater(namespace string, pool *redis.Pool, workerPoolID s
 	}
 
 	h := &workerPoolHeartbeater{
-		workerPoolID: workerPoolID,
-		namespace:    namespace,
-		pool:         pool,
-
-		concurrency: concurrency,
-
+		workerPoolID:     workerPoolID,
+		namespace:        namespace,
+		pool:             pool,
+		beatPeriod:       beatPeriod,
+		concurrency:      concurrency,
 		stopChan:         make(chan struct{}),
 		doneStoppingChan: make(chan struct{}),
 
@@ -82,7 +84,7 @@ func (h *workerPoolHeartbeater) stop() {
 func (h *workerPoolHeartbeater) loop() {
 	h.startedAt = nowEpochSeconds()
 	h.heartbeat() // do it right away
-	ticker := time.Tick(5000 * time.Millisecond)
+	ticker := time.Tick(h.beatPeriod)
 	for {
 		select {
 		case <-h.stopChan:
@@ -112,7 +114,6 @@ func (h *workerPoolHeartbeater) heartbeat() {
 		"host", h.hostname,
 		"pid", h.pid,
 	)
-	conn.Send("EXPIRE", heartbeatKey, 60)
 
 	if err := conn.Flush(); err != nil {
 		logError("heartbeat", err)

@@ -9,6 +9,8 @@ import (
 	"github.com/garyburd/redigo/redis"
 )
 
+const fetchKeysPerJobType = 6
+
 type worker struct {
 	workerID    string
 	poolID      string
@@ -71,11 +73,17 @@ func (w *worker) updateMiddlewareAndJobTypes(middleware []*middlewareHandler, jo
 	w.middleware = middleware
 	sampler := prioritySampler{}
 	for _, jt := range jobTypes {
-		sampler.add(jt.Priority, w.commander.KeyJobs(w.namespace, jt.Name), w.commander.KeyJobsInProgress(w.namespace, w.poolID, jt.Name))
+		sampler.add(jt.Priority,
+			w.commander.KeyJobs(w.namespace, jt.Name),
+			w.commander.KeyJobsInProgress(w.namespace, w.poolID, jt.Name),
+			w.commander.KeyJobsPaused(w.namespace, jt.Name),
+			w.commander.KeyJobsLock(w.namespace, jt.Name),
+			w.commander.KeyJobsLockInfo(w.namespace, jt.Name),
+			w.commander.KeyJobsConcurrency(w.namespace, jt.Name))
 	}
 	w.sampler = sampler
 	w.jobTypes = jobTypes
-	w.redisFetchScript = redis.NewScript(len(jobTypes)*2, w.commander.RpoplpushMultiCmd())
+	w.redisFetchScript = redis.NewScript(len(jobTypes)*fetchKeysPerJobType, w.commander.FetchJob())
 }
 
 func (w *worker) start() {
@@ -115,29 +123,25 @@ func (w *worker) loop() {
 			drained = true
 			timer.Reset(0)
 		case <-timer.C:
-			gotJob := true
-			for gotJob {
-				job, err := w.fetchJob()
-				if err != nil {
-					logError("worker.fetch", err)
-					gotJob = false
-					timer.Reset(10 * time.Millisecond)
-				} else if job != nil {
-					w.processJob(job)
-					consequtiveNoJobs = 0
-				} else {
-					gotJob = false
-					if drained {
-						w.doneDrainingChan <- struct{}{}
-						drained = false
-					}
-					consequtiveNoJobs++
-					idx := consequtiveNoJobs
-					if idx >= int64(len(sleepBackoffsInMilliseconds)) {
-						idx = int64(len(sleepBackoffsInMilliseconds)) - 1
-					}
-					timer.Reset(time.Duration(sleepBackoffsInMilliseconds[idx]) * time.Millisecond)
+			job, err := w.fetchJob()
+			if err != nil {
+				logError("worker.fetch", err)
+				timer.Reset(10 * time.Millisecond)
+			} else if job != nil {
+				w.processJob(job)
+				consequtiveNoJobs = 0
+				timer.Reset(0)
+			} else {
+				if drained {
+					w.doneDrainingChan <- struct{}{}
+					drained = false
 				}
+				consequtiveNoJobs++
+				idx := consequtiveNoJobs
+				if idx >= int64(len(sleepBackoffsInMilliseconds)) {
+					idx = int64(len(sleepBackoffsInMilliseconds)) - 1
+				}
+				timer.Reset(time.Duration(sleepBackoffsInMilliseconds[idx]) * time.Millisecond)
 			}
 		}
 	}
@@ -147,14 +151,16 @@ func (w *worker) fetchJob() (*Job, error) {
 	// resort queues
 	// NOTE: we could optimize this to only resort every second, or something.
 	w.sampler.sample()
+	numKeys := len(w.sampler.samples) * fetchKeysPerJobType
+	var scriptArgs = make([]interface{}, 0, numKeys+1)
 
-	var scriptArgs = make([]interface{}, 0, len(w.sampler.samples)*2)
 	for _, s := range w.sampler.samples {
-		scriptArgs = append(scriptArgs, s.redisJobs, s.redisJobsInProg)
+		scriptArgs = append(scriptArgs, s.redisJobs, s.redisJobsInProg, s.redisJobsPaused, s.redisJobsLock, s.redisJobsLockInfo, s.redisJobsMaxConcurrency) // KEYS[1-6 * N]
 	}
-
+	scriptArgs = append(scriptArgs, w.poolID) // ARGV[1]
 	conn := w.pool.Get()
 	defer conn.Close()
+
 	values, err := redis.Values(w.redisFetchScript.Do(conn, scriptArgs...))
 	if err == redis.ErrNil {
 		return nil, nil
@@ -231,8 +237,12 @@ func (w *worker) removeJobFromInProgress(job *Job) {
 	conn := w.pool.Get()
 	defer conn.Close()
 
-	_, err := conn.Do("LREM", job.inProgQueue, 1, job.rawJSON)
-	if err != nil {
+	// remove job from in progress and decr the lock in one transaction
+	conn.Send("MULTI")
+	conn.Send("LREM", job.inProgQueue, 1, job.rawJSON)
+	conn.Send("DECR", redisKeyJobsLock(w.namespace, job.Name))
+	conn.Send("HINCRBY", redisKeyJobsLockInfo(w.namespace, job.Name), w.poolID, -1)
+	if _, err := conn.Do("EXEC"); err != nil {
 		logError("worker.remove_job_from_in_progress.lrem", err)
 	}
 }
@@ -258,14 +268,26 @@ func (w *worker) addToRetry(job *Job, runErr error) {
 	conn := w.pool.Get()
 	defer conn.Close()
 
-	conn.Send("MULTI")
-	conn.Send("LREM", job.inProgQueue, 1, job.rawJSON)
-	conn.Send("ZADD", w.commander.KeyRetry(w.namespace), nowEpochSeconds()+backoff(job.Fails), rawJSON)
-	_, err = conn.Do("EXEC")
-	if err != nil {
-		logError("worker.add_to_retry.exec", err)
+	var backoff BackoffCalculator
+
+	// Choose the backoff provider
+	jt, ok := w.jobTypes[job.Name]
+	if ok {
+		backoff = jt.Backoff
 	}
 
+	if backoff == nil {
+		backoff = defaultBackoffCalculator
+	}
+
+	conn.Send("MULTI")
+	conn.Send("LREM", job.inProgQueue, 1, job.rawJSON)
+	conn.Send("DECR", w.commander.KeyJobsLock(w.namespace, job.Name))
+	conn.Send("HINCRBY", w.commander.KeyJobsLockInfo(w.namespace, job.Name), w.poolID, -1)
+	conn.Send("ZADD", w.commander.KeyRetry(w.namespace), nowEpochSeconds()+backoff(job), rawJSON)
+	if _, err = conn.Do("EXEC"); err != nil {
+		logError("worker.add_to_retry.exec", err)
+	}
 }
 
 func (w *worker) addToDead(job *Job, runErr error) {
@@ -286,6 +308,8 @@ func (w *worker) addToDead(job *Job, runErr error) {
 
 	conn.Send("MULTI")
 	conn.Send("LREM", job.inProgQueue, 1, job.rawJSON)
+	conn.Send("DECR", w.commander.KeyJobsLock(w.namespace, job.Name))
+	conn.Send("HINCRBY", w.commander.KeyJobsLockInfo(w.namespace, job.Name), w.poolID, -1)
 	conn.Send("ZADD", w.commander.KeyDead(w.namespace), nowEpochSeconds(), rawJSON)
 	_, err = conn.Do("EXEC")
 	if err != nil {
@@ -293,7 +317,8 @@ func (w *worker) addToDead(job *Job, runErr error) {
 	}
 }
 
-// backoff returns number of seconds t
-func backoff(fails int64) int64 {
+// Default algorithm returns an fastly increasing backoff counter which grows in an unbounded fashion
+func defaultBackoffCalculator(job *Job) int64 {
+	fails := job.Fails
 	return (fails * fails * fails * fails) + 15 + (rand.Int63n(30) * (fails + 1))
 }
