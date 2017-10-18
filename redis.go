@@ -6,7 +6,9 @@ import (
 	"fmt"
 )
 
-func redisNamespacePrefix(namespace string) string {
+type RedisDBCommand struct {}
+
+func (r *RedisDBCommand) NamespacePrefix(namespace string) string {
 	l := len(namespace)
 	if (l > 0) && (namespace[l-1] != ':') {
 		namespace = namespace + ":"
@@ -14,52 +16,52 @@ func redisNamespacePrefix(namespace string) string {
 	return namespace
 }
 
-func redisKeyKnownJobs(namespace string) string {
-	return redisNamespacePrefix(namespace) + "known_jobs"
+func (r *RedisDBCommand) KeyKnownJobs(namespace string) string {
+	return r.NamespacePrefix(namespace) + "known_jobs"
 }
 
 // returns "<namespace>:jobs:"
 // so that we can just append the job name and be good to go
-func redisKeyJobsPrefix(namespace string) string {
-	return redisNamespacePrefix(namespace) + "jobs:"
+func (r *RedisDBCommand) KeyJobsPrefix(namespace string) string {
+	return r.NamespacePrefix(namespace) + "jobs:"
 }
 
-func redisKeyJobs(namespace, jobName string) string {
-	return redisKeyJobsPrefix(namespace) + jobName
+func (r *RedisDBCommand) KeyJobs(namespace, jobName string) string {
+	return r.KeyJobsPrefix(namespace) + jobName
 }
 
-func redisKeyJobsInProgress(namespace, poolID, jobName string) string {
-	return fmt.Sprintf("%s:%s:inprogress", redisKeyJobs(namespace, jobName), poolID)
+func (r *RedisDBCommand) KeyJobsInProgress(namespace, poolID, jobName string) string {
+	return fmt.Sprintf("%s:%s:inprogress", r.KeyJobs(namespace, jobName), poolID)
 }
 
-func redisKeyRetry(namespace string) string {
-	return redisNamespacePrefix(namespace) + "retry"
+func (r *RedisDBCommand) KeyRetry(namespace string) string {
+	return r.NamespacePrefix(namespace) + "retry"
 }
 
-func redisKeyDead(namespace string) string {
-	return redisNamespacePrefix(namespace) + "dead"
+func (r *RedisDBCommand) KeyDead(namespace string) string {
+	return r.NamespacePrefix(namespace) + "dead"
 }
 
-func redisKeyScheduled(namespace string) string {
-	return redisNamespacePrefix(namespace) + "scheduled"
+func (r *RedisDBCommand) KeyScheduled(namespace string) string {
+	return r.NamespacePrefix(namespace) + "scheduled"
 }
 
-func redisKeyWorkerObservation(namespace, workerID string) string {
-	return redisNamespacePrefix(namespace) + "worker:" + workerID
+func (r *RedisDBCommand) KeyWorkerObservation(namespace, workerID string) string {
+	return r.NamespacePrefix(namespace) + "worker:" + workerID
 }
 
-func redisKeyWorkerPools(namespace string) string {
-	return redisNamespacePrefix(namespace) + "worker_pools"
+func (r *RedisDBCommand) KeyWorkerPools(namespace string) string {
+	return r.NamespacePrefix(namespace) + "worker_pools"
 }
 
-func redisKeyHeartbeat(namespace, workerPoolID string) string {
-	return redisNamespacePrefix(namespace) + "worker_pools:" + workerPoolID
+func (r *RedisDBCommand) KeyHeartbeat(namespace, workerPoolID string) string {
+	return r.NamespacePrefix(namespace) + "worker_pools:" + workerPoolID
 }
 
-func redisKeyUniqueJob(namespace, jobName string, args map[string]interface{}) (string, error) {
+func (r *RedisDBCommand) KeyUniqueJob(namespace, jobName string, args map[string]interface{}) (string, error) {
 	var buf bytes.Buffer
 
-	buf.WriteString(redisNamespacePrefix(namespace))
+	buf.WriteString(r.NamespacePrefix(namespace))
 	buf.WriteString("unique:")
 	buf.WriteString(jobName)
 	buf.WriteRune(':')
@@ -74,8 +76,8 @@ func redisKeyUniqueJob(namespace, jobName string, args map[string]interface{}) (
 	return buf.String(), nil
 }
 
-func redisKeyLastPeriodicEnqueue(namespace string) string {
-	return redisNamespacePrefix(namespace) + "last_periodic_enqueue"
+func (r *RedisDBCommand) KeyLastPeriodicEnqueue(namespace string) string {
+	return r.NamespacePrefix(namespace) + "last_periodic_enqueue"
 }
 
 // KEYS[1] = the 1st job queue we want to try, eg, "work:jobs:emails"
@@ -85,44 +87,48 @@ func redisKeyLastPeriodicEnqueue(namespace string) string {
 // ...
 // KEYS[N] = the last job queue...
 // KEYS[N+1] = the last job queue's in prog queue...
-var redisLuaRpoplpushMultiCmd = `
-local res
-local keylen = #KEYS
-for i=1,keylen,2 do
-  res = redis.call('rpoplpush', KEYS[i], KEYS[i+1])
-  if res then
-    return {res, KEYS[i], KEYS[i+1]}
-  end
-end
-return nil
-`
+func (r *RedisDBCommand) RpoplpushMultiCmd() string {
+	return `
+	local res
+	local keylen = #KEYS
+	for i=1,keylen,2 do
+		res = redis.call('rpoplpush', KEYS[i], KEYS[i+1])
+		if res then
+			return {res, KEYS[i], KEYS[i+1]}
+		end
+	end
+	return nil
+	`
+}
 
 // KEYS[1] = zset of jobs (retry or scheduled), eg work:retry
 // KEYS[2] = zset of dead, eg work:dead. If we don't know the jobName of a job, we'll put it in dead.
 // KEYS[3...] = known job queues, eg ["work:jobs:create_watch", "work:jobs:send_email", ...]
 // ARGV[1] = jobs prefix, eg, "work:jobs:". We'll take that and append the job name from the JSON object in order to queue up a job
 // ARGV[2] = current time in epoch seconds
-var redisLuaZremLpushCmd = `
-local res, j, queue
-res = redis.call('zrangebyscore', KEYS[1], '-inf', ARGV[2], 'LIMIT', 0, 1)
-if #res > 0 then
-  j = cjson.decode(res[1])
-  redis.call('zrem', KEYS[1], res[1])
-  queue = ARGV[1] .. j['name']
-  for _,v in pairs(KEYS) do
-    if v == queue then
-      j['t'] = tonumber(ARGV[2])
-      redis.call('lpush', queue, cjson.encode(j))
-      return 'ok'
-    end
-  end
-  j['err'] = 'unknown job when requeueing'
-  j['failed_at'] = tonumber(ARGV[2])
-  redis.call('zadd', KEYS[2], ARGV[2], cjson.encode(j))
-  return 'dead' -- put on dead queue
-end
-return nil
-`
+func (r *RedisDBCommand) ZremLpushCmd() string {
+	return `
+	local res, j, queue
+	res = redis.call('zrangebyscore', KEYS[1], '-inf', ARGV[2], 'LIMIT', 0, 1)
+	if #res > 0 then
+		j = cjson.decode(res[1])
+		redis.call('zrem', KEYS[1], res[1])
+		queue = ARGV[1] .. j['name']
+		for _,v in pairs(KEYS) do
+			if v == queue then
+				j['t'] = tonumber(ARGV[2])
+				redis.call('lpush', queue, cjson.encode(j))
+				return 'ok'
+			end
+		end
+		j['err'] = 'unknown job when requeueing'
+		j['failed_at'] = tonumber(ARGV[2])
+		redis.call('zadd', KEYS[2], ARGV[2], cjson.encode(j))
+		return 'dead' -- put on dead queue
+	end
+	return nil
+	`
+}
 
 // KEYS[1] = zset of (dead|scheduled|retry), eg, work:dead
 // ARGV[1] = died at. The z rank of the job.
@@ -130,7 +136,8 @@ return nil
 // Returns:
 // - number of jobs deleted (typically 1 or 0)
 // - job bytes (last job only)
-var redisLuaDeleteSingleCmd = `
+func (r *RedisDBCommand) DeleteSingleCmd() string {
+	return `
 local jobs, i, j, deletedCount, jobBytes
 jobs = redis.call('zrangebyscore', KEYS[1], ARGV[1], ARGV[1])
 local jobCount = #jobs
@@ -146,6 +153,7 @@ for i=1,jobCount do
 end
 return {deletedCount, jobBytes}
 `
+}
 
 // KEYS[1] = zset of dead jobs, eg, work:dead
 // KEYS[2...] = known job queues, eg ["work:jobs:create_watch", "work:jobs:send_email", ...]
@@ -154,7 +162,8 @@ return {deletedCount, jobBytes}
 // ARGV[3] = died at. The z rank of the job.
 // ARGV[4] = job ID to requeue
 // Returns: number of jobs requeued (typically 1 or 0)
-var redisLuaRequeueSingleDeadCmd = `
+func (r *RedisDBCommand) RequeueSingleDeadCmd() string {
+	return `
 local jobs, i, j, queue, found, requeuedCount
 jobs = redis.call('zrangebyscore', KEYS[1], ARGV[3], ARGV[3])
 local jobCount = #jobs
@@ -186,6 +195,7 @@ for i=1,jobCount do
 end
 return requeuedCount
 `
+}
 
 // KEYS[1] = zset of dead jobs, eg work:dead
 // KEYS[2...] = known job queues, eg ["work:jobs:create_watch", "work:jobs:send_email", ...]
@@ -193,7 +203,8 @@ return requeuedCount
 // ARGV[2] = current time in epoch seconds
 // ARGV[3] = max number of jobs to requeue
 // Returns: number of jobs requeued
-var redisLuaRequeueAllDeadCmd = `
+func (r *RedisDBCommand) RequeueAllDeadCmd() string {
+	return `
 local jobs, i, j, queue, found, requeuedCount
 jobs = redis.call('zrangebyscore', KEYS[1], '-inf', ARGV[2], 'LIMIT', 0, ARGV[3])
 local jobCount = #jobs
@@ -223,26 +234,31 @@ for i=1,jobCount do
 end
 return requeuedCount
 `
+}
 
 // KEYS[1] = job queue to push onto
 // KEYS[2] = Unique job's key. Test for existance and set if we push.
 // ARGV[1] = job
-var redisLuaEnqueueUnique = `
-if redis.call('set', KEYS[2], '1', 'NX', 'EX', '86400') then
-  redis.call('lpush', KEYS[1], ARGV[1])
-  return 'ok'
-end
-return 'dup'
-`
+func (r *RedisDBCommand) EnqueueUnique() string {
+	return `
+	if redis.call('set', KEYS[2], '1', 'NX', 'EX', '86400') then
+		redis.call('lpush', KEYS[1], ARGV[1])
+		return 'ok'
+	end
+	return 'dup'
+	`
+}
 
 // KEYS[1] = scheduled job queue
 // KEYS[2] = Unique job's key. Test for existance and set if we push.
 // ARGV[1] = job
 // ARGV[2] = epoch seconds for job to be run at
-var redisLuaEnqueueUniqueIn = `
-if redis.call('set', KEYS[2], '1', 'NX', 'EX', '86400') then
-  redis.call('zadd', KEYS[1], ARGV[2], ARGV[1])
-  return 'ok'
-end
-return 'dup'
-`
+func (r *RedisDBCommand) EnqueueUniqueIn() string {
+	return `
+	if redis.call('set', KEYS[2], '1', 'NX', 'EX', '86400') then
+		redis.call('zadd', KEYS[1], ARGV[2], ARGV[1])
+		return 'ok'
+	end
+	return 'dup'
+	`
+}

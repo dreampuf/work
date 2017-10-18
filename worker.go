@@ -27,13 +27,23 @@ type worker struct {
 
 	drainChan        chan struct{}
 	doneDrainingChan chan struct{}
+
+	commander        DBCommand
 }
 
-func newWorker(namespace string, poolID string, pool *redis.Pool, contextType reflect.Type, middleware []*middlewareHandler, jobTypes map[string]*jobType) *worker {
-	workerID := makeIdentifier()
-	ob := newObserver(namespace, pool, workerID)
+func newWorker(namespace string, poolID string, pool *redis.Pool, contextType reflect.Type, middleware []*middlewareHandler, jobTypes map[string]*jobType, commanders ...DBCommand) *worker {
+	var commander DBCommand
+	if len(commanders) == 0 {
+		commander = &RedisDBCommand{}
+	} else {
+		commander = commanders[0]
+	}
 
-	w := &worker{
+	workerID := makeIdentifier()
+	ob := newObserver(namespace, pool, workerID, commander)
+
+	var w *worker
+	w = &worker{
 		workerID:    workerID,
 		poolID:      poolID,
 		namespace:   namespace,
@@ -47,6 +57,8 @@ func newWorker(namespace string, poolID string, pool *redis.Pool, contextType re
 
 		drainChan:        make(chan struct{}),
 		doneDrainingChan: make(chan struct{}),
+
+		commander:        commander,
 	}
 
 	w.updateMiddlewareAndJobTypes(middleware, jobTypes)
@@ -59,11 +71,11 @@ func (w *worker) updateMiddlewareAndJobTypes(middleware []*middlewareHandler, jo
 	w.middleware = middleware
 	sampler := prioritySampler{}
 	for _, jt := range jobTypes {
-		sampler.add(jt.Priority, redisKeyJobs(w.namespace, jt.Name), redisKeyJobsInProgress(w.namespace, w.poolID, jt.Name))
+		sampler.add(jt.Priority, w.commander.KeyJobs(w.namespace, jt.Name), w.commander.KeyJobsInProgress(w.namespace, w.poolID, jt.Name))
 	}
 	w.sampler = sampler
 	w.jobTypes = jobTypes
-	w.redisFetchScript = redis.NewScript(len(jobTypes)*2, redisLuaRpoplpushMultiCmd)
+	w.redisFetchScript = redis.NewScript(len(jobTypes)*2, w.commander.RpoplpushMultiCmd())
 }
 
 func (w *worker) start() {
@@ -202,7 +214,7 @@ func (w *worker) processJob(job *Job) {
 }
 
 func (w *worker) deleteUniqueJob(job *Job) {
-	uniqueKey, err := redisKeyUniqueJob(w.namespace, job.Name, job.Args)
+	uniqueKey, err := w.commander.KeyUniqueJob(w.namespace, job.Name, job.Args)
 	if err != nil {
 		logError("worker.delete_unique_job.key", err)
 	}
@@ -248,7 +260,7 @@ func (w *worker) addToRetry(job *Job, runErr error) {
 
 	conn.Send("MULTI")
 	conn.Send("LREM", job.inProgQueue, 1, job.rawJSON)
-	conn.Send("ZADD", redisKeyRetry(w.namespace), nowEpochSeconds()+backoff(job.Fails), rawJSON)
+	conn.Send("ZADD", w.commander.KeyRetry(w.namespace), nowEpochSeconds()+backoff(job.Fails), rawJSON)
 	_, err = conn.Do("EXEC")
 	if err != nil {
 		logError("worker.add_to_retry.exec", err)
@@ -274,7 +286,7 @@ func (w *worker) addToDead(job *Job, runErr error) {
 
 	conn.Send("MULTI")
 	conn.Send("LREM", job.inProgQueue, 1, job.rawJSON)
-	conn.Send("ZADD", redisKeyDead(w.namespace), nowEpochSeconds(), rawJSON)
+	conn.Send("ZADD", w.commander.KeyDead(w.namespace), nowEpochSeconds(), rawJSON)
 	_, err = conn.Do("EXEC")
 	if err != nil {
 		logError("worker.add_to_dead.exec", err)

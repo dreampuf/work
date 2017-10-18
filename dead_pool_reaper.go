@@ -19,14 +19,22 @@ type deadPoolReaper struct {
 	pool             *redis.Pool
 	stopChan         chan struct{}
 	doneStoppingChan chan struct{}
+	commander        DBCommand
 }
 
-func newDeadPoolReaper(namespace string, pool *redis.Pool) *deadPoolReaper {
+func newDeadPoolReaper(namespace string, pool *redis.Pool, commanders ...DBCommand) *deadPoolReaper {
+	var commander DBCommand
+	if len(commanders) == 0 {
+	        commander = &RedisDBCommand{}
+	} else {
+	        commander = commanders[0]
+	}
 	return &deadPoolReaper{
 		namespace:        namespace,
 		pool:             pool,
 		stopChan:         make(chan struct{}),
 		doneStoppingChan: make(chan struct{}),
+		commander:        commander,
 	}
 }
 
@@ -76,7 +84,7 @@ func (r *deadPoolReaper) reap() error {
 	conn := r.pool.Get()
 	defer conn.Close()
 
-	workerPoolsKey := redisKeyWorkerPools(r.namespace)
+	workerPoolsKey := r.commander.KeyWorkerPools(r.namespace)
 
 	// Cleanup all dead pools
 	for deadPoolID, jobTypes := range deadPoolIDs {
@@ -84,7 +92,7 @@ func (r *deadPoolReaper) reap() error {
 		r.requeueInProgressJobs(deadPoolID, jobTypes)
 
 		// Remove hearbeat
-		_, err = conn.Do("DEL", redisKeyHeartbeat(r.namespace, deadPoolID))
+		_, err = conn.Do("DEL", r.commander.KeyHeartbeat(r.namespace, deadPoolID))
 		if err != nil {
 			return err
 		}
@@ -100,11 +108,11 @@ func (r *deadPoolReaper) reap() error {
 }
 
 func (r *deadPoolReaper) requeueInProgressJobs(poolID string, jobTypes []string) error {
-	redisRequeueScript := redis.NewScript(len(jobTypes)*2, redisLuaRpoplpushMultiCmd)
+	redisRequeueScript := redis.NewScript(len(jobTypes)*2, r.commander.RpoplpushMultiCmd())
 
 	var scriptArgs = make([]interface{}, 0, len(jobTypes)*2)
 	for _, jobType := range jobTypes {
-		scriptArgs = append(scriptArgs, redisKeyJobsInProgress(r.namespace, poolID, jobType), redisKeyJobs(r.namespace, jobType))
+		scriptArgs = append(scriptArgs, r.commander.KeyJobsInProgress(r.namespace, poolID, jobType), r.commander.KeyJobs(r.namespace, jobType))
 	}
 
 	conn := r.pool.Get()
@@ -129,7 +137,7 @@ func (r *deadPoolReaper) findDeadPools() (map[string][]string, error) {
 	conn := r.pool.Get()
 	defer conn.Close()
 
-	workerPoolsKey := redisKeyWorkerPools(r.namespace)
+	workerPoolsKey := r.commander.KeyWorkerPools(r.namespace)
 
 	workerPoolIDs, err := redis.Strings(conn.Do("SMEMBERS", workerPoolsKey))
 	if err != nil {
@@ -138,7 +146,7 @@ func (r *deadPoolReaper) findDeadPools() (map[string][]string, error) {
 
 	deadPools := map[string][]string{}
 	for _, workerPoolID := range workerPoolIDs {
-		heartbeatKey := redisKeyHeartbeat(r.namespace, workerPoolID)
+		heartbeatKey := r.commander.KeyHeartbeat(r.namespace, workerPoolID)
 
 		// Check that last heartbeat was long enough ago to consider the pool dead
 		heartbeatAt, err := redis.Int64(conn.Do("HGET", heartbeatKey, "heartbeat_at"))

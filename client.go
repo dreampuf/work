@@ -20,13 +20,21 @@ var ErrNotRetried = fmt.Errorf("nothing retried")
 type Client struct {
 	namespace string
 	pool      *redis.Pool
+	commander DBCommand
 }
 
 // NewClient creates a new Client with the specified redis namespace and connection pool.
-func NewClient(namespace string, pool *redis.Pool) *Client {
+func NewClient(namespace string, pool *redis.Pool, commanders ...DBCommand) *Client {
+	var commander DBCommand
+	if len(commanders) == 0 {
+		commander = &RedisDBCommand{}
+	} else {
+		commander = commanders[0]
+	}
 	return &Client{
 		namespace: namespace,
 		pool:      pool,
+		commander: commander,
 	}
 }
 
@@ -47,7 +55,7 @@ func (c *Client) WorkerPoolHeartbeats() ([]*WorkerPoolHeartbeat, error) {
 	conn := c.pool.Get()
 	defer conn.Close()
 
-	workerPoolsKey := redisKeyWorkerPools(c.namespace)
+	workerPoolsKey := c.commander.KeyWorkerPools(c.namespace)
 
 	workerPoolIDs, err := redis.Strings(conn.Do("SMEMBERS", workerPoolsKey))
 	if err != nil {
@@ -56,7 +64,7 @@ func (c *Client) WorkerPoolHeartbeats() ([]*WorkerPoolHeartbeat, error) {
 	sort.Strings(workerPoolIDs)
 
 	for _, wpid := range workerPoolIDs {
-		key := redisKeyHeartbeat(c.namespace, wpid)
+		key := c.commander.KeyHeartbeat(c.namespace, wpid)
 		conn.Send("HGETALL", key)
 	}
 
@@ -147,7 +155,7 @@ func (c *Client) WorkerObservations() ([]*WorkerObservation, error) {
 	}
 
 	for _, wid := range workerIDs {
-		key := redisKeyWorkerObservation(c.namespace, wid)
+		key := c.commander.KeyWorkerObservation(c.namespace, wid)
 		conn.Send("HGETALL", key)
 	}
 
@@ -213,7 +221,7 @@ func (c *Client) Queues() ([]*Queue, error) {
 	conn := c.pool.Get()
 	defer conn.Close()
 
-	key := redisKeyKnownJobs(c.namespace)
+	key := c.commander.KeyKnownJobs(c.namespace)
 	jobNames, err := redis.Strings(conn.Do("SMEMBERS", key))
 	if err != nil {
 		return nil, err
@@ -221,7 +229,7 @@ func (c *Client) Queues() ([]*Queue, error) {
 	sort.Strings(jobNames)
 
 	for _, jobName := range jobNames {
-		conn.Send("LLEN", redisKeyJobs(c.namespace, jobName))
+		conn.Send("LLEN", c.commander.KeyJobs(c.namespace, jobName))
 	}
 
 	if err := conn.Flush(); err != nil {
@@ -248,7 +256,7 @@ func (c *Client) Queues() ([]*Queue, error) {
 
 	for _, s := range queues {
 		if s.Count > 0 {
-			conn.Send("LINDEX", redisKeyJobs(c.namespace, s.JobName), -1)
+			conn.Send("LINDEX", c.commander.KeyJobs(c.namespace, s.JobName), -1)
 		}
 	}
 
@@ -298,7 +306,7 @@ type DeadJob struct {
 
 // ScheduledJobs returns a list of ScheduledJob's. The page param is 1-based; each page is 20 items. The total number of items (not pages) in the list of scheduled jobs is also returned.
 func (c *Client) ScheduledJobs(page uint) ([]*ScheduledJob, int64, error) {
-	key := redisKeyScheduled(c.namespace)
+	key := c.commander.KeyScheduled(c.namespace)
 	jobsWithScores, count, err := c.getZsetPage(key, page)
 	if err != nil {
 		logError("client.scheduled_jobs.get_zset_page", err)
@@ -316,7 +324,7 @@ func (c *Client) ScheduledJobs(page uint) ([]*ScheduledJob, int64, error) {
 
 // RetryJobs returns a list of RetryJob's. The page param is 1-based; each page is 20 items. The total number of items (not pages) in the list of retry jobs is also returned.
 func (c *Client) RetryJobs(page uint) ([]*RetryJob, int64, error) {
-	key := redisKeyRetry(c.namespace)
+	key := c.commander.KeyRetry(c.namespace)
 	jobsWithScores, count, err := c.getZsetPage(key, page)
 	if err != nil {
 		logError("client.retry_jobs.get_zset_page", err)
@@ -334,7 +342,7 @@ func (c *Client) RetryJobs(page uint) ([]*RetryJob, int64, error) {
 
 // DeadJobs returns a list of DeadJob's. The page param is 1-based; each page is 20 items. The total number of items (not pages) in the list of dead jobs is also returned.
 func (c *Client) DeadJobs(page uint) ([]*DeadJob, int64, error) {
-	key := redisKeyDead(c.namespace)
+	key := c.commander.KeyDead(c.namespace)
 	jobsWithScores, count, err := c.getZsetPage(key, page)
 	if err != nil {
 		logError("client.dead_jobs.get_zset_page", err)
@@ -352,7 +360,7 @@ func (c *Client) DeadJobs(page uint) ([]*DeadJob, int64, error) {
 
 // DeleteDeadJob deletes a dead job from Redis.
 func (c *Client) DeleteDeadJob(diedAt int64, jobID string) error {
-	ok, _, err := c.deleteZsetJob(redisKeyDead(c.namespace), diedAt, jobID)
+	ok, _, err := c.deleteZsetJob(c.commander.KeyDead(c.namespace), diedAt, jobID)
 	if err != nil {
 		return err
 	}
@@ -377,14 +385,14 @@ func (c *Client) RetryDeadJob(diedAt int64, jobID string) error {
 		jobNames = append(jobNames, q.JobName)
 	}
 
-	script := redis.NewScript(len(jobNames)+1, redisLuaRequeueSingleDeadCmd)
+	script := redis.NewScript(len(jobNames)+1, c.commander.RequeueSingleDeadCmd())
 
 	args := make([]interface{}, 0, len(jobNames)+1+3)
-	args = append(args, redisKeyDead(c.namespace)) // KEY[1]
+	args = append(args, c.commander.KeyDead(c.namespace)) // KEY[1]
 	for _, jobName := range jobNames {
-		args = append(args, redisKeyJobs(c.namespace, jobName)) // KEY[2, 3, ...]
+		args = append(args, c.commander.KeyJobs(c.namespace, jobName)) // KEY[2, 3, ...]
 	}
-	args = append(args, redisKeyJobsPrefix(c.namespace)) // ARGV[1]
+	args = append(args, c.commander.KeyJobsPrefix(c.namespace)) // ARGV[1]
 	args = append(args, nowEpochSeconds())
 	args = append(args, diedAt)
 	args = append(args, jobID)
@@ -420,14 +428,14 @@ func (c *Client) RetryAllDeadJobs() error {
 		jobNames = append(jobNames, q.JobName)
 	}
 
-	script := redis.NewScript(len(jobNames)+1, redisLuaRequeueAllDeadCmd)
+	script := redis.NewScript(len(jobNames)+1, c.commander.RequeueAllDeadCmd())
 
 	args := make([]interface{}, 0, len(jobNames)+1+3)
-	args = append(args, redisKeyDead(c.namespace)) // KEY[1]
+	args = append(args, c.commander.KeyDead(c.namespace)) // KEY[1]
 	for _, jobName := range jobNames {
-		args = append(args, redisKeyJobs(c.namespace, jobName)) // KEY[2, 3, ...]
+		args = append(args, c.commander.KeyJobs(c.namespace, jobName)) // KEY[2, 3, ...]
 	}
-	args = append(args, redisKeyJobsPrefix(c.namespace)) // ARGV[1]
+	args = append(args, c.commander.KeyJobsPrefix(c.namespace)) // ARGV[1]
 	args = append(args, nowEpochSeconds())
 	args = append(args, 1000)
 
@@ -455,7 +463,7 @@ func (c *Client) RetryAllDeadJobs() error {
 func (c *Client) DeleteAllDeadJobs() error {
 	conn := c.pool.Get()
 	defer conn.Close()
-	_, err := conn.Do("DEL", redisKeyDead(c.namespace))
+	_, err := conn.Do("DEL", c.commander.KeyDead(c.namespace))
 	if err != nil {
 		logError("client.delete_all_dead_jobs", err)
 		return err
@@ -466,7 +474,7 @@ func (c *Client) DeleteAllDeadJobs() error {
 
 // DeleteScheduledJob deletes a job in the scheduled queue.
 func (c *Client) DeleteScheduledJob(scheduledFor int64, jobID string) error {
-	ok, jobBytes, err := c.deleteZsetJob(redisKeyScheduled(c.namespace), scheduledFor, jobID)
+	ok, jobBytes, err := c.deleteZsetJob(c.commander.KeyScheduled(c.namespace), scheduledFor, jobID)
 	if err != nil {
 		return err
 	}
@@ -480,7 +488,7 @@ func (c *Client) DeleteScheduledJob(scheduledFor int64, jobID string) error {
 		}
 
 		if job.Unique {
-			uniqueKey, err := redisKeyUniqueJob(c.namespace, job.Name, job.Args)
+			uniqueKey, err := c.commander.KeyUniqueJob(c.namespace, job.Name, job.Args)
 			if err != nil {
 				logError("client.delete_scheduled_job.redis_key_unique_job", err)
 				return err
@@ -504,7 +512,7 @@ func (c *Client) DeleteScheduledJob(scheduledFor int64, jobID string) error {
 
 // DeleteRetryJob deletes a job in the retry queue.
 func (c *Client) DeleteRetryJob(retryAt int64, jobID string) error {
-	ok, _, err := c.deleteZsetJob(redisKeyRetry(c.namespace), retryAt, jobID)
+	ok, _, err := c.deleteZsetJob(c.commander.KeyRetry(c.namespace), retryAt, jobID)
 	if err != nil {
 		return err
 	}
@@ -516,7 +524,7 @@ func (c *Client) DeleteRetryJob(retryAt int64, jobID string) error {
 
 // deleteZsetJob deletes the job in the specified zset (dead, retry, or scheduled queue). zsetKey is like "work:dead" or "work:scheduled". The function deletes all jobs with the given jobID with the specified zscore (there should only be one, but in theory there could be bad data). It will return if at least one job is deleted and if
 func (c *Client) deleteZsetJob(zsetKey string, zscore int64, jobID string) (bool, []byte, error) {
-	script := redis.NewScript(1, redisLuaDeleteSingleCmd)
+	script := redis.NewScript(1, c.commander.DeleteSingleCmd())
 
 	args := make([]interface{}, 0, 1+2)
 	args = append(args, zsetKey) // KEY[1]

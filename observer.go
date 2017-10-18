@@ -30,6 +30,8 @@ type observer struct {
 
 	drainChan        chan struct{}
 	doneDrainingChan chan struct{}
+
+	commander        DBCommand
 }
 
 type observationKind int
@@ -61,7 +63,13 @@ type observation struct {
 
 const observerBufferSize = 1024
 
-func newObserver(namespace string, pool *redis.Pool, workerID string) *observer {
+func newObserver(namespace string, pool *redis.Pool, workerID string, commanders ...DBCommand) *observer {
+	var commander DBCommand
+	if len(commanders) == 0 {
+		commander = &RedisDBCommand{}
+	} else {
+		commander = commanders[0]
+	}
 	return &observer{
 		namespace:        namespace,
 		workerID:         workerID,
@@ -73,6 +81,8 @@ func newObserver(namespace string, pool *redis.Pool, workerID string) *observer 
 
 		drainChan:        make(chan struct{}),
 		doneDrainingChan: make(chan struct{}),
+
+		commander:        commander,
 	}
 }
 
@@ -185,7 +195,7 @@ func (o *observer) writeStatus(obv *observation) error {
 	conn := o.pool.Get()
 	defer conn.Close()
 
-	key := redisKeyWorkerObservation(o.namespace, o.workerID)
+	key := o.commander.KeyWorkerObservation(o.namespace, o.workerID)
 
 	if obv == nil {
 		if _, err := conn.Do("DEL", key); err != nil {

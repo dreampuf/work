@@ -14,21 +14,31 @@ type Enqueuer struct {
 	knownJobs             map[string]int64
 	enqueueUniqueScript   *redis.Script
 	enqueueUniqueInScript *redis.Script
+
+	commander             DBCommand
 }
 
 // NewEnqueuer creates a new enqueuer with the specified Redis namespace and Redis pool.
-func NewEnqueuer(namespace string, pool *redis.Pool) *Enqueuer {
+func NewEnqueuer(namespace string, pool *redis.Pool, commanders ...DBCommand) *Enqueuer {
 	if pool == nil {
 		panic("NewEnqueuer needs a non-nil *redis.Pool")
+	}
+
+	var commander DBCommand
+	if len(commanders) == 0 {
+		commander = &RedisDBCommand{}
+	} else {
+		commander = commanders[0]
 	}
 
 	return &Enqueuer{
 		Namespace:             namespace,
 		Pool:                  pool,
-		queuePrefix:           redisKeyJobsPrefix(namespace),
+		queuePrefix:           commander.KeyJobsPrefix(namespace),
 		knownJobs:             make(map[string]int64),
-		enqueueUniqueScript:   redis.NewScript(2, redisLuaEnqueueUnique),
-		enqueueUniqueInScript: redis.NewScript(2, redisLuaEnqueueUniqueIn),
+		enqueueUniqueScript:   redis.NewScript(2, commander.EnqueueUnique()),
+		enqueueUniqueInScript: redis.NewScript(2, commander.EnqueueUniqueIn()),
+		commander:             commander,
 	}
 }
 
@@ -83,7 +93,7 @@ func (e *Enqueuer) EnqueueIn(jobName string, secondsFromNow int64, args map[stri
 		Job:   job,
 	}
 
-	_, err = conn.Do("ZADD", redisKeyScheduled(e.Namespace), scheduledJob.RunAt, rawJSON)
+	_, err = conn.Do("ZADD", e.commander.KeyScheduled(e.Namespace), scheduledJob.RunAt, rawJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +109,7 @@ func (e *Enqueuer) EnqueueIn(jobName string, secondsFromNow int64, args map[stri
 // In order to add robustness to the system, jobs are only unique for 24 hours after they're enqueued. This is mostly relevant for scheduled jobs.
 // EnqueueUnique returns the job if it was enqueued and nil if it wasn't
 func (e *Enqueuer) EnqueueUnique(jobName string, args map[string]interface{}) (*Job, error) {
-	uniqueKey, err := redisKeyUniqueJob(e.Namespace, jobName, args)
+	uniqueKey, err := e.commander.KeyUniqueJob(e.Namespace, jobName, args)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +148,7 @@ func (e *Enqueuer) EnqueueUnique(jobName string, args map[string]interface{}) (*
 
 // EnqueueUniqueIn enqueues a unique job in the scheduled job queue for execution in secondsFromNow seconds. See EnqueueUnique for the semantics of unique jobs.
 func (e *Enqueuer) EnqueueUniqueIn(jobName string, secondsFromNow int64, args map[string]interface{}) (*ScheduledJob, error) {
-	uniqueKey, err := redisKeyUniqueJob(e.Namespace, jobName, args)
+	uniqueKey, err := e.commander.KeyUniqueJob(e.Namespace, jobName, args)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +179,7 @@ func (e *Enqueuer) EnqueueUniqueIn(jobName string, secondsFromNow int64, args ma
 	}
 
 	scriptArgs := make([]interface{}, 0, 4)
-	scriptArgs = append(scriptArgs, redisKeyScheduled(e.Namespace)) // KEY[1]
+	scriptArgs = append(scriptArgs, e.commander.KeyScheduled(e.Namespace)) // KEY[1]
 	scriptArgs = append(scriptArgs, uniqueKey)                      // KEY[2]
 	scriptArgs = append(scriptArgs, rawJSON)                        // ARGV[1]
 	scriptArgs = append(scriptArgs, scheduledJob.RunAt)             // ARGV[2]
@@ -192,7 +202,7 @@ func (e *Enqueuer) addToKnownJobs(conn redis.Conn, jobName string) error {
 		}
 	}
 	if needSadd {
-		if _, err := conn.Do("SADD", redisKeyKnownJobs(e.Namespace), jobName); err != nil {
+		if _, err := conn.Do("SADD", e.commander.KeyKnownJobs(e.Namespace), jobName); err != nil {
 			return err
 		}
 		e.knownJobs[jobName] = now + 300

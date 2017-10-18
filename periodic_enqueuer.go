@@ -20,6 +20,7 @@ type periodicEnqueuer struct {
 	scheduledPeriodicJobs []*scheduledPeriodicJob
 	stopChan              chan struct{}
 	doneStoppingChan      chan struct{}
+	commander             DBCommand
 }
 
 type periodicJob struct {
@@ -34,13 +35,21 @@ type scheduledPeriodicJob struct {
 	*periodicJob
 }
 
-func newPeriodicEnqueuer(namespace string, pool *redis.Pool, periodicJobs []*periodicJob) *periodicEnqueuer {
+func newPeriodicEnqueuer(namespace string, pool *redis.Pool, periodicJobs []*periodicJob, commanders ...DBCommand) *periodicEnqueuer {
+	var commander DBCommand
+	if len(commanders) == 0 {
+		commander = &RedisDBCommand{}
+	} else {
+		commander = commanders[0]
+	}
+
 	return &periodicEnqueuer{
 		namespace:        namespace,
 		pool:             pool,
 		periodicJobs:     periodicJobs,
 		stopChan:         make(chan struct{}),
 		doneStoppingChan: make(chan struct{}),
+		commander:        commander,
 	}
 }
 
@@ -109,14 +118,14 @@ func (pe *periodicEnqueuer) enqueue() error {
 				return err
 			}
 
-			_, err = conn.Do("ZADD", redisKeyScheduled(pe.namespace), epoch, rawJSON)
+			_, err = conn.Do("ZADD", pe.commander.KeyScheduled(pe.namespace), epoch, rawJSON)
 			if err != nil {
 				return err
 			}
 		}
 	}
 
-	_, err := conn.Do("SET", redisKeyLastPeriodicEnqueue(pe.namespace), now)
+	_, err := conn.Do("SET", pe.commander.KeyLastPeriodicEnqueue(pe.namespace), now)
 
 	return err
 }
@@ -125,7 +134,7 @@ func (pe *periodicEnqueuer) shouldEnqueue() bool {
 	conn := pe.pool.Get()
 	defer conn.Close()
 
-	lastEnqueue, err := redis.Int64(conn.Do("GET", redisKeyLastPeriodicEnqueue(pe.namespace)))
+	lastEnqueue, err := redis.Int64(conn.Do("GET", pe.commander.KeyLastPeriodicEnqueue(pe.namespace)))
 	if err == redis.ErrNil {
 		return true
 	} else if err != nil {

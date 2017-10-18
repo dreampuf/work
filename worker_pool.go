@@ -28,6 +28,8 @@ type WorkerPool struct {
 	scheduler        *requeuer
 	deadPoolReaper   *deadPoolReaper
 	periodicEnqueuer *periodicEnqueuer
+
+	commander        DBCommand
 }
 
 type jobType struct {
@@ -62,9 +64,16 @@ type middlewareHandler struct {
 }
 
 // NewWorkerPool creates a new worker pool. ctx should be a struct literal whose type will be used for middleware and handlers. concurrency specifies how many workers to spin up - each worker can process jobs concurrently.
-func NewWorkerPool(ctx interface{}, concurrency uint, namespace string, pool *redis.Pool) *WorkerPool {
+func NewWorkerPool(ctx interface{}, concurrency uint, namespace string, pool *redis.Pool, commanders ...DBCommand) *WorkerPool {
 	if pool == nil {
 		panic("NewWorkerPool needs a non-nil *redis.Pool")
+	}
+
+	var commander DBCommand
+	if len(commanders) == 0 {
+		commander = &RedisDBCommand{}
+	} else {
+		commander = commanders[0]
 	}
 
 	ctxType := reflect.TypeOf(ctx)
@@ -76,10 +85,11 @@ func NewWorkerPool(ctx interface{}, concurrency uint, namespace string, pool *re
 		pool:         pool,
 		contextType:  ctxType,
 		jobTypes:     make(map[string]*jobType),
+		commander:    commander,
 	}
 
 	for i := uint(0); i < wp.concurrency; i++ {
-		w := newWorker(wp.namespace, wp.workerPoolID, wp.pool, wp.contextType, nil, wp.jobTypes)
+		w := newWorker(wp.namespace, wp.workerPoolID, wp.pool, wp.contextType, nil, wp.jobTypes, commander)
 		wp.workers = append(wp.workers, w)
 	}
 
@@ -171,10 +181,10 @@ func (wp *WorkerPool) Start() {
 		go w.start()
 	}
 
-	wp.heartbeater = newWorkerPoolHeartbeater(wp.namespace, wp.pool, wp.workerPoolID, wp.jobTypes, wp.concurrency, wp.workerIDs())
+	wp.heartbeater = newWorkerPoolHeartbeater(wp.namespace, wp.pool, wp.workerPoolID, wp.jobTypes, wp.concurrency, wp.workerIDs(), wp.commander)
 	wp.heartbeater.start()
 	wp.startRequeuers()
-	wp.periodicEnqueuer = newPeriodicEnqueuer(wp.namespace, wp.pool, wp.periodicJobs)
+	wp.periodicEnqueuer = newPeriodicEnqueuer(wp.namespace, wp.pool, wp.periodicJobs, wp.commander)
 	wp.periodicEnqueuer.start()
 }
 
@@ -219,9 +229,9 @@ func (wp *WorkerPool) startRequeuers() {
 	for k := range wp.jobTypes {
 		jobNames = append(jobNames, k)
 	}
-	wp.retrier = newRequeuer(wp.namespace, wp.pool, redisKeyRetry(wp.namespace), jobNames)
-	wp.scheduler = newRequeuer(wp.namespace, wp.pool, redisKeyScheduled(wp.namespace), jobNames)
-	wp.deadPoolReaper = newDeadPoolReaper(wp.namespace, wp.pool)
+	wp.retrier = newRequeuer(wp.namespace, wp.pool, wp.commander.KeyRetry(wp.namespace), jobNames, wp.commander)
+	wp.scheduler = newRequeuer(wp.namespace, wp.pool, wp.commander.KeyScheduled(wp.namespace), jobNames, wp.commander)
+	wp.deadPoolReaper = newDeadPoolReaper(wp.namespace, wp.pool, wp.commander)
 	wp.retrier.start()
 	wp.scheduler.start()
 	wp.deadPoolReaper.start()
@@ -244,7 +254,7 @@ func (wp *WorkerPool) writeKnownJobsToRedis() {
 	conn := wp.pool.Get()
 	defer conn.Close()
 
-	key := redisKeyKnownJobs(wp.namespace)
+	key := wp.commander.KeyKnownJobs(wp.namespace)
 
 	jobNames := make([]interface{}, 0, len(wp.jobTypes)+1)
 	jobNames = append(jobNames, key)

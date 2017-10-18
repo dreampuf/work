@@ -20,23 +20,31 @@ type requeuer struct {
 
 	drainChan        chan struct{}
 	doneDrainingChan chan struct{}
+
+	commander        DBCommand
 }
 
-func newRequeuer(namespace string, pool *redis.Pool, requeueKey string, jobNames []string) *requeuer {
+func newRequeuer(namespace string, pool *redis.Pool, requeueKey string, jobNames []string, commanders ...DBCommand) *requeuer {
+	var commander DBCommand
+	if len(commanders) == 0 {
+		commander = &RedisDBCommand{}
+	} else {
+		commander = commanders[0]
+	}
 	args := make([]interface{}, 0, len(jobNames)+2+2)
 	args = append(args, requeueKey)              // KEY[1]
-	args = append(args, redisKeyDead(namespace)) // KEY[2]
+	args = append(args, commander.KeyDead(namespace)) // KEY[2]
 	for _, jobName := range jobNames {
-		args = append(args, redisKeyJobs(namespace, jobName)) // KEY[3, 4, ...]
+		args = append(args, commander.KeyJobs(namespace, jobName)) // KEY[3, 4, ...]
 	}
-	args = append(args, redisKeyJobsPrefix(namespace)) // ARGV[1]
+	args = append(args, commander.KeyJobsPrefix(namespace)) // ARGV[1]
 	args = append(args, 0)                             // ARGV[2] -- NOTE: We're going to change this one on every call
 
 	return &requeuer{
 		namespace: namespace,
 		pool:      pool,
 
-		redisRequeueScript: redis.NewScript(len(jobNames)+2, redisLuaZremLpushCmd),
+		redisRequeueScript: redis.NewScript(len(jobNames)+2, commander.ZremLpushCmd()),
 		redisRequeueArgs:   args,
 
 		stopChan:         make(chan struct{}),
@@ -44,6 +52,8 @@ func newRequeuer(namespace string, pool *redis.Pool, requeueKey string, jobNames
 
 		drainChan:        make(chan struct{}),
 		doneDrainingChan: make(chan struct{}),
+
+		commander:        commander,
 	}
 }
 

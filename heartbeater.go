@@ -24,9 +24,18 @@ type workerPoolHeartbeater struct {
 
 	stopChan         chan struct{}
 	doneStoppingChan chan struct{}
+
+	commander   DBCommand
 }
 
-func newWorkerPoolHeartbeater(namespace string, pool *redis.Pool, workerPoolID string, jobTypes map[string]*jobType, concurrency uint, workerIDs []string) *workerPoolHeartbeater {
+func newWorkerPoolHeartbeater(namespace string, pool *redis.Pool, workerPoolID string, jobTypes map[string]*jobType, concurrency uint, workerIDs []string, commanders ...DBCommand) *workerPoolHeartbeater {
+	var commander DBCommand
+	if len(commanders) == 0 {
+		commander = &RedisDBCommand{}
+	} else {
+		commander = commanders[0]
+	}
+
 	h := &workerPoolHeartbeater{
 		workerPoolID: workerPoolID,
 		namespace:    namespace,
@@ -36,6 +45,8 @@ func newWorkerPoolHeartbeater(namespace string, pool *redis.Pool, workerPoolID s
 
 		stopChan:         make(chan struct{}),
 		doneStoppingChan: make(chan struct{}),
+
+		commander:        commander,
 	}
 
 	jobNames := make([]string, 0, len(jobTypes))
@@ -88,8 +99,8 @@ func (h *workerPoolHeartbeater) heartbeat() {
 	conn := h.pool.Get()
 	defer conn.Close()
 
-	workerPoolsKey := redisKeyWorkerPools(h.namespace)
-	heartbeatKey := redisKeyHeartbeat(h.namespace, h.workerPoolID)
+	workerPoolsKey := h.commander.KeyWorkerPools(h.namespace)
+	heartbeatKey := h.commander.KeyHeartbeat(h.namespace, h.workerPoolID)
 
 	conn.Send("SADD", workerPoolsKey, h.workerPoolID)
 	conn.Send("HMSET", heartbeatKey,
@@ -112,8 +123,8 @@ func (h *workerPoolHeartbeater) removeHeartbeat() {
 	conn := h.pool.Get()
 	defer conn.Close()
 
-	workerPoolsKey := redisKeyWorkerPools(h.namespace)
-	heartbeatKey := redisKeyHeartbeat(h.namespace, h.workerPoolID)
+	workerPoolsKey := h.commander.KeyWorkerPools(h.namespace)
+	heartbeatKey := h.commander.KeyHeartbeat(h.namespace, h.workerPoolID)
 
 	conn.Send("SREM", workerPoolsKey, h.workerPoolID)
 	conn.Send("DEL", heartbeatKey)
