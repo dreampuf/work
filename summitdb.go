@@ -113,8 +113,8 @@ func (s *SummitDBCommand) ZremLpushCmd() string {
 	var res, j, queue;
 	res = redis.call('zrangebyscore', KEYS[0], '-inf', ARGV[1], 'LIMIT', 0, 1);
 	if (res.length > 0) {
-		j = JSON.parse(res[1]);
-		redis.call('zrem', KEYS[0], res[1]);
+		j = JSON.parse(res[0]);
+		redis.call('zrem', KEYS[0], res[0]);
 		queue = ARGV[0] + j['name'];
 		for (var i = 0; i < KEYS.length; i ++) {
 	    var v = KEYS[i];
