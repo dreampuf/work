@@ -46,7 +46,7 @@ class App extends React.Component {
 // See https://github.com/reactjs/react-router/issues/1857.
 render(
   <Router history={hashHistory}>
-    <Route path="./" component={App}>
+    <Route path={this.props.prefix} component={App}>
       <Route path="/processes" component={ () => <Processes busyWorkerURL="/busy_workers" workerPoolURL="/worker_pools" /> } />
       <Route path="/queues" component={ () => <Queues url="/queues" /> } />
       <Route path="/retry_jobs" component={ () => <RetryJobs url="/retry_jobs" /> } />
