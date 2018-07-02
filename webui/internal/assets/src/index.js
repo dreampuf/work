@@ -13,6 +13,7 @@ import cx from './cx';
 class App extends React.Component {
   static propTypes = {
     children: PropTypes.element.isRequired,
+    prefix: "/worker"
   }
 
   render() {
