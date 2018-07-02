@@ -595,7 +595,7 @@ type emptyCtx struct{}
 // The pool is Stop()ped while jobs are still going on.  Tests that the
 // pool processing is really stopped and that it's not first completely
 // drained before returning.
-// https://github.com/gocraft/work/issues/24
+// https://github.com/dreampuf/work/issues/24
 func TestWorkerPoolStop(t *testing.T) {
 	ns := "will_it_end"
 	pool := newTestPool(":6379")

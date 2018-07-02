@@ -9,8 +9,8 @@ import (
 
 	"github.com/braintree/manners"
 	"github.com/gocraft/web"
-	"github.com/gocraft/work"
-	"github.com/gocraft/work/webui/internal/assets"
+	"github.com/dreampuf/work"
+	"github.com/dreampuf/work/webui/internal/assets"
 	"github.com/gomodule/redigo/redis"
 )
 
@@ -30,8 +30,8 @@ type context struct {
 }
 
 // NewServer creates and returns a new server. The 'namespace' param is the redis namespace to use. The hostPort param is the address to bind on to expose the API.
-func NewServer(namespace string, pool *redis.Pool, hostPort string) *Server {
-	router := web.New(context{})
+func NewServer(namespace string, pool *redis.Pool, hostPort, prefix string) *Server {
+	router := web.NewWithPrefix(context{}, prefix)
 	server := &Server{
 		namespace: namespace,
 		pool:      pool,
@@ -89,6 +89,10 @@ func (w *Server) Start() {
 func (w *Server) Stop() {
 	w.server.Close()
 	w.wg.Wait()
+}
+
+func (w *Server) Router() *web.Router {
+       return w.router
 }
 
 func (c *context) queues(rw web.ResponseWriter, r *web.Request) {

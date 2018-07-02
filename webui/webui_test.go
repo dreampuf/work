@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gocraft/work"
+	"github.com/dreampuf/work"
 	"github.com/gomodule/redigo/redis"
 	"github.com/stretchr/testify/assert"
 )
@@ -19,7 +19,7 @@ func TestWebUIStartStop(t *testing.T) {
 	ns := "work"
 	cleanKeyspace(ns, pool)
 
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666", "")
 	s.Start()
 	s.Stop()
 }
@@ -62,7 +62,7 @@ func TestWebUIQueues(t *testing.T) {
 	enqueuer.Enqueue("foo", nil)
 	enqueuer.Enqueue("zaz", nil)
 
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666", "")
 
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "/queues", nil)
@@ -101,7 +101,7 @@ func TestWebUIWorkerPools(t *testing.T) {
 
 	time.Sleep(20 * time.Millisecond)
 
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666", "")
 
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "/worker_pools", nil)
@@ -145,7 +145,7 @@ func TestWebUIBusyWorkers(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond)
 
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666", "")
 
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "/busy_workers", nil)
@@ -199,7 +199,7 @@ func TestWebUIRetryJobs(t *testing.T) {
 	wp.Drain()
 	wp.Stop()
 
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666", "")
 
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "/retry_jobs", nil)
@@ -234,7 +234,7 @@ func TestWebUIScheduledJobs(t *testing.T) {
 	_, err := enqueuer.EnqueueIn("watter", 1, nil)
 	assert.Nil(t, err)
 
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666", "")
 
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "/scheduled_jobs", nil)
@@ -276,7 +276,7 @@ func TestWebUIDeadJobs(t *testing.T) {
 	wp.Drain()
 	wp.Stop()
 
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666", "")
 
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "/dead_jobs", nil)
@@ -364,7 +364,7 @@ func TestWebUIDeadJobsDeleteRetryAll(t *testing.T) {
 	wp.Drain()
 	wp.Stop()
 
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666", "")
 
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "/dead_jobs", nil)
@@ -450,7 +450,7 @@ func TestWebUIDeadJobsDeleteRetryAll(t *testing.T) {
 func TestWebUIAssets(t *testing.T) {
 	pool := newTestPool(":6379")
 	ns := "testwork"
-	s := NewServer(ns, pool, ":6666")
+	s := NewServer(ns, pool, ":6666","")
 
 	recorder := httptest.NewRecorder()
 	request, _ := http.NewRequest("GET", "/", nil)
