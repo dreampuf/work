@@ -17,6 +17,7 @@ var (
 	redisDatabase  = flag.String("database", "0", "redis database")
 	redisNamespace = flag.String("ns", "work", "redis namespace")
 	webHostPort    = flag.String("listen", ":5040", "hostport to listen for HTTP JSON API")
+	prefix         = flag.String("prefix", "", "prefix of worker")
 )
 
 func main() {
@@ -36,7 +37,7 @@ func main() {
 
 	pool := newPool(*redisHostPort, database)
 
-	server := webui.NewServer(*redisNamespace, pool, *webHostPort, "/worker")
+	server := webui.NewServer(*redisNamespace, pool, *webHostPort, *prefix)
 	server.Start()
 
 	c := make(chan os.Signal, 1)
