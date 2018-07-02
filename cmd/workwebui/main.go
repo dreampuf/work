@@ -36,7 +36,7 @@ func main() {
 
 	pool := newPool(*redisHostPort, database)
 
-	server := webui.NewServer(*redisNamespace, pool, *webHostPort)
+	server := webui.NewServer(*redisNamespace, pool, *webHostPort, "/worker")
 	server.Start()
 
 	c := make(chan os.Signal, 1)
