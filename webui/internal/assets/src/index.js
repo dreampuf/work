@@ -10,7 +10,7 @@ import { Router, Route, Link, IndexRedirect, hashHistory } from 'react-router';
 import styles from './bootstrap.min.css';
 import cx from './cx';
 
-const prefix = location.pathname.replace(/\/$/, "");
+const prefix = location.pathname.replace(/(\/[^/]+)$/, "");
 
 class App extends React.Component {
   static propTypes = {
