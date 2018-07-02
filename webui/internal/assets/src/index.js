@@ -13,6 +13,7 @@ import cx from './cx';
 class App extends React.Component {
   static propTypes = {
     children: PropTypes.element.isRequired,
+    prefix: "/worker"
   }
 
   render() {
@@ -45,21 +46,21 @@ class App extends React.Component {
 // See https://github.com/reactjs/react-router/issues/1857.
 render(
   <Router history={hashHistory}>
-    <Route path="/worker" component={App}>
-      <Route path="/processes" component={ () => <Processes busyWorkerURL="/busy_workers" workerPoolURL="/worker_pools" /> } />
-      <Route path="/queues" component={ () => <Queues url="/queues" /> } />
-      <Route path="/retry_jobs" component={ () => <RetryJobs url="/retry_jobs" /> } />
-      <Route path="/scheduled_jobs" component={ () => <ScheduledJobs url="/scheduled_jobs" /> } />
-      <Route path="/dead_jobs" component={ () =>
+    <Route component={App}>
+      <Route path="./processes" component={ () => <Processes busyWorkerURL="./busy_workers" workerPoolURL="./worker_pools" /> } />
+      <Route path="./queues" component={ () => <Queues url="./queues" /> } />
+      <Route path="./retry_jobs" component={ () => <RetryJobs url="./retry_jobs" /> } />
+      <Route path="./scheduled_jobs" component={ () => <ScheduledJobs url="./scheduled_jobs" /> } />
+      <Route path="./dead_jobs" component={ () =>
         <DeadJobs
-          fetchURL="/dead_jobs"
-          retryURL="/retry_dead_job"
-          retryAllURL="/retry_all_dead_jobs"
-          deleteURL="/delete_dead_job"
-          deleteAllURL="/delete_all_dead_jobs"
+          fetchURL="./dead_jobs"
+          retryURL="./retry_dead_job"
+          retryAllURL="./retry_all_dead_jobs"
+          deleteURL="./delete_dead_job"
+          deleteAllURL="./delete_all_dead_jobs"
         />
       } />
-      <IndexRedirect from="" to="/processes" />
+      <IndexRedirect from="" to="./processes" />
     </Route>
   </Router>,
   document.getElementById('app')
